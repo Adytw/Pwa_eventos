@@ -214,4 +214,4 @@ EventPass_PWA/
 - El sistema de notificaciones implementa permiso y notificación de prueba; el envío push remoto requiere Web Push, sus claves VAPID y una función backend.
 - Antes de un uso con datos personales reales, deben añadirse aviso de privacidad, políticas de retención, controles de acceso revisados y pruebas de seguridad.
 
-La entrega es una base funcional para ejecutar, probar y ampliar el proyecto escolar, no una certificación de seguridad ni un servicio ya desplegado en producción.
+!La entrega es una base funcional para ejecutar, probar y ampliar el proyecto escolar, no una certificación de seguridad ni un servicio ya desplegado en producción.!

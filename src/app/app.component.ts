@@ -1,5 +1,6 @@
 import {
   AfterViewInit,
+  ChangeDetectorRef,
   Component,
   ElementRef,
   OnDestroy,
@@ -12,7 +13,7 @@ import { IonApp } from '@ionic/angular';
 import { BrowserMultiFormatReader, IScannerControls } from '@zxing/browser';
 import QRCode from 'qrcode';
 import { AttendanceRecord, EventRecord, RegistrationRecord, TicketQrPayload, TicketRecord, UserRole } from './core/models';
-import { db, seedDemoData } from './core/eventpass-db';
+import { createId, db, seedDemoData } from './core/eventpass-db';
 import { CloudService } from './core/cloud.service';
 
 type Section = 'dashboard' | 'events' | 'registrations' | 'tickets' | 'scanner' | 'attendance' | 'reports' | 'settings';
@@ -80,15 +81,23 @@ export class AppComponent implements OnInit, AfterViewInit, OnDestroy {
     this.deferredInstallPrompt = event as BeforeInstallPromptEvent;
   };
 
-  constructor(public readonly cloud: CloudService) {}
+  constructor(
+    public readonly cloud: CloudService,
+    private readonly changeDetector: ChangeDetectorRef
+  ) {}
 
   async ngOnInit(): Promise<void> {
     window.addEventListener('online', this.onOnline);
     window.addEventListener('offline', this.onOffline);
     window.addEventListener('beforeinstallprompt', this.onBeforeInstallPrompt);
-    await seedDemoData();
-    await this.refreshData();
-    this.cloudSignedIn = await this.cloud.hasSession().catch(() => false);
+    try {
+      await seedDemoData();
+      await this.refreshData();
+      this.cloudSignedIn = await this.cloud.hasSession().catch(() => false);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'No se pudo abrir la base de datos local.';
+      this.showToast(`No se pudieron cargar los datos locales: ${message}`);
+    }
   }
 
   ngAfterViewInit(): void {}
@@ -114,17 +123,21 @@ export class AppComponent implements OnInit, AfterViewInit, OnDestroy {
   }
 
   async refreshData(): Promise<void> {
-    const [events, registrations, tickets, attendance] = await Promise.all([
+    const [events, registrations, allTickets, attendance] = await Promise.all([
       db.events.orderBy('startsAt').toArray(),
       db.registrations.orderBy('registeredAt').reverse().toArray(),
-      db.tickets.orderBy('createdAt').reverse().toArray(),
+      db.tickets.toArray(),
       db.attendance.orderBy('scannedAt').reverse().toArray()
     ]);
+    const tickets = allTickets.sort((left, right) =>
+      right.createdAt.localeCompare(left.createdAt)
+    );
     this.events = events;
     this.registrations = registrations;
     this.tickets = tickets;
     this.attendance = attendance;
     if (!this.registrationForm.eventId && events.length) this.registrationForm.eventId = events[0].id;
+    this.changeDetector.detectChanges();
   }
 
   navigate(section: Section): void {
@@ -202,30 +215,38 @@ export class AppComponent implements OnInit, AfterViewInit, OnDestroy {
   }
 
   async saveEvent(): Promise<void> {
-    if (!this.eventForm.title.trim() || !this.eventForm.location.trim() || !this.eventForm.startsAt || this.eventForm.capacity < 1) {
+    const capacity = Number(this.eventForm.capacity);
+    const startsAt = new Date(this.eventForm.startsAt);
+    if (!this.eventForm.title.trim() || !this.eventForm.location.trim() || !this.eventForm.startsAt ||
+      !Number.isFinite(capacity) || capacity < 1 || Number.isNaN(startsAt.getTime())) {
       this.showToast('Completa el nombre, lugar, fecha y una capacidad válida.');
       return;
     }
     const existing = this.editingEventId ? this.events.find((item) => item.id === this.editingEventId) : undefined;
     const event: EventRecord = {
-      id: this.editingEventId ?? crypto.randomUUID(),
+      id: this.editingEventId ?? createId(),
       title: this.eventForm.title.trim(),
       category: this.eventForm.category,
       description: this.eventForm.description.trim(),
       location: this.eventForm.location.trim(),
-      startsAt: new Date(this.eventForm.startsAt).toISOString(),
-      capacity: Number(this.eventForm.capacity),
+      startsAt: startsAt.toISOString(),
+      capacity,
       status: this.eventForm.status,
       organizer: existing?.organizer ?? this.currentUserName,
       latitude: this.eventCoordinates?.latitude,
       longitude: this.eventCoordinates?.longitude,
       createdAt: existing?.createdAt ?? new Date().toISOString()
     };
-    await db.events.put(event);
-    this.isEventFormOpen = false;
-    await this.refreshData();
-    this.showToast(this.editingEventId ? 'Evento actualizado correctamente.' : 'Evento creado correctamente.');
-    this.editingEventId = null;
+    try {
+      await db.events.put(event);
+      this.isEventFormOpen = false;
+      await this.refreshData();
+      this.showToast(this.editingEventId ? 'Evento actualizado correctamente.' : 'Evento creado correctamente.');
+      this.editingEventId = null;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'No se pudo guardar en IndexedDB.';
+      this.showToast(`No se pudo guardar el evento: ${message}`);
+    }
   }
 
   async deleteEvent(event: EventRecord): Promise<void> {
@@ -282,13 +303,13 @@ export class AppComponent implements OnInit, AfterViewInit, OnDestroy {
     }
 
     const registration: RegistrationRecord = {
-      id: crypto.randomUUID(), eventId: event.id, attendeeName: name,
+      id: createId(), eventId: event.id, attendeeName: name,
       email, registeredAt: new Date().toISOString(), status: 'confirmed'
     };
     const ticket: TicketRecord = {
-      id: crypto.randomUUID(), eventId: event.id, registrationId: registration.id,
+      id: createId(), eventId: event.id, registrationId: registration.id,
       attendeeName: name, attendeeEmail: email,
-      code: `EP-${crypto.randomUUID().replaceAll('-', '').slice(0, 16).toUpperCase()}`,
+      code: `EP-${createId().replaceAll('-', '').slice(0, 16).toUpperCase()}`,
       status: 'valid', createdAt: new Date().toISOString()
     };
     await db.transaction('rw', db.registrations, db.tickets, async () => {
@@ -340,7 +361,6 @@ export class AppComponent implements OnInit, AfterViewInit, OnDestroy {
           if (result) {
             const raw = result.getText();
             this.stopScanner();
-            this.scannerInput = raw;
             void this.validateTicket(raw);
           }
         }
@@ -360,11 +380,13 @@ export class AppComponent implements OnInit, AfterViewInit, OnDestroy {
   }
 
   async validateManualCode(): Promise<void> {
-    if (!this.scannerInput.trim()) {
+    const rawValue = this.scannerInput.trim();
+    this.scannerInput = '';
+    if (!rawValue) {
       this.showToast('Escribe o escanea un código QR.');
       return;
     }
-    await this.validateTicket(this.scannerInput.trim());
+    await this.validateTicket(rawValue);
   }
 
   async validateTicket(rawValue: string): Promise<void> {
@@ -402,7 +424,7 @@ export class AppComponent implements OnInit, AfterViewInit, OnDestroy {
     }
 
     const attendance: AttendanceRecord = {
-      id: crypto.randomUUID(), ticketId: ticket.id, eventId: ticket.eventId,
+      id: createId(), ticketId: ticket.id, eventId: ticket.eventId,
       attendeeName: ticket.attendeeName, scannedAt: new Date().toISOString(),
       scannerName: this.currentUserName, syncStatus: 'pending',
       deviceId: this.getDeviceId()
@@ -428,7 +450,7 @@ export class AppComponent implements OnInit, AfterViewInit, OnDestroy {
     const key = 'eventpass-device-id';
     let id = localStorage.getItem(key);
     if (!id) {
-      id = crypto.randomUUID();
+      id = createId();
       localStorage.setItem(key, id);
     }
     return id;
